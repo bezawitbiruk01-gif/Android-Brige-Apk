@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android Bridge</string>
+    <string name="accessibility_description">User-authorized Android UI bridge for visible app interactions.</string>
+</resources>
