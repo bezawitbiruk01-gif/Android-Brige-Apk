@@ -19,7 +19,7 @@ public class BridgeRelayService extends Service {
         if (Build.VERSION.SDK_INT >= 26) {
             notification = new Notification.Builder(this, CHANNEL_ID)
                     .setContentTitle("Android Bridge is active")
-                    .setContentText("Secure relay connection is enabled. Tap Emergency Stop in the app to stop.")
+                    .setContentText("Secure relay connection is enabled. Use the app's Emergency Stop to stop.")
                     .setSmallIcon(android.R.drawable.stat_sys_upload_done)
                     .setOngoing(true)
                     .build();
@@ -45,6 +45,13 @@ public class BridgeRelayService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        boolean wasEnabled = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+                .getBoolean(MainActivity.KEY_BRIDGE_ENABLED, false);
+        if (!wasEnabled) {
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        MainActivity.enabled = true;
         BridgeServer.startIfNeeded();
         RelayClient.start(this);
         return START_STICKY;
