@@ -1,12 +1,15 @@
 import { createServer } from "node:http";
-import { randomInt, randomUUID, createHmac, timingSafeEqual } from "node:crypto";
+import { randomInt, randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
 const PORT = Number(process.env.PORT || 8787);
-const MCP_API_KEY = process.env.MCP_API_KEY || "";
 const DEVICE_SIGNING_SECRET = process.env.DEVICE_SIGNING_SECRET || "";
+const OWNER_PIN = process.env.OWNER_PIN || "";
+const PUBLIC_ORIGIN = (process.env.PUBLIC_ORIGIN || "https://biruk-ai-player-relay.onrender.com").replace(/\/$/, "");
+const OAUTH_SCOPE = "bridge:control";
+const OAUTH_RESOURCE = PUBLIC_ORIGIN;
 const MAX_BODY = 24 * 1024;
 const DEVICE_ONLINE_MS = 75_000;
 const PAIR_CODE_TTL_MS = 5 * 60_000;
@@ -16,6 +19,9 @@ const pairCodes = new Map();
 const devices = new Map();
 const pending = new Map();
 const pairAttempts = new Map();
+const oauthAuthorizeRequests = new Map();
+const oauthCodes = new Map();
+const oauthAttemptLimits = new Map();
 
 function now() { return Date.now(); }
 function json(res, status, value) {
@@ -41,10 +47,124 @@ function bearer(req) {
   return header.startsWith("Bearer ") ? header.slice(7) : "";
 }
 function relayConfigured() {
-  return MCP_API_KEY.length >= 32 && DEVICE_SIGNING_SECRET.length >= 32;
+  return DEVICE_SIGNING_SECRET.length >= 32 && OWNER_PIN.length >= 16;
 }
-function mcpAuthorized(req) {
-  return relayConfigured() && safeEqualText(bearer(req), MCP_API_KEY);
+function deriveOAuthKey(purpose) {
+  return createHmac("sha256", DEVICE_SIGNING_SECRET).update("ai-player-relay:" + purpose).digest();
+}
+function signOAuthPayload(payload, purpose) {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", deriveOAuthKey(purpose)).update(encoded).digest("base64url");
+  return encoded + "." + signature;
+}
+function verifyOAuthPayload(token, purpose) {
+  if (!relayConfigured() || typeof token !== "string" || token.length > 16384) return null;
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  const expected = createHmac("sha256", deriveOAuthKey(purpose)).update(parts[0]).digest("base64url");
+  if (!safeEqualText(parts[1], expected)) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+function validOAuthClient(clientId) {
+  const client = verifyOAuthPayload(clientId, "oauth-client");
+  if (!client || !Array.isArray(client.redirect_uris) || client.redirect_uris.length < 1) return null;
+  if (!client.redirect_uris.every(isAllowedRedirectUri)) return null;
+  return client;
+}
+function verifyAccessToken(token) {
+  const claims = verifyOAuthPayload(token, "oauth-access");
+  if (!claims || claims.kind !== "access" || claims.iss !== PUBLIC_ORIGIN
+      || claims.aud !== OAUTH_RESOURCE || !Number.isFinite(claims.exp) || claims.exp <= now()
+      || typeof claims.scope !== "string" || !claims.scope.split(" ").includes(OAUTH_SCOPE)) return null;
+  return claims;
+}
+function verifyRefreshToken(token) {
+  const claims = verifyOAuthPayload(token, "oauth-refresh");
+  if (!claims || claims.kind !== "refresh" || claims.iss !== PUBLIC_ORIGIN
+      || claims.aud !== OAUTH_RESOURCE || !Number.isFinite(claims.exp) || claims.exp <= now()
+      || typeof claims.client_id !== "string") return null;
+  return claims;
+}
+function validMcpRequest(req) {
+  return !!verifyAccessToken(bearer(req));
+}
+function isAllowedRedirectUri(value) {
+  try {
+    const u = new URL(value);
+    if (u.protocol !== "https:" || u.username || u.password || u.port && u.port !== "443") return false;
+    if (u.hostname !== "chatgpt.com" && u.hostname !== "chat.openai.com") return false;
+    return u.pathname.startsWith("/connector/oauth/") || u.pathname === "/connector_platform_oauth_redirect";
+  } catch {
+    return false;
+  }
+}
+function html(res, status, markup) {
+  const body = Buffer.from(markup, "utf8");
+  res.writeHead(status, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Length": body.length,
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "X-Frame-Options": "DENY",
+    "Connection": "close"
+  });
+  res.end(body);
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
+}
+function authorizePage(requestId, notice = "") {
+  const safeNotice = notice ? "<p class='notice'>" + escapeHtml(notice) + "</p>" : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Android Bridge</title><style>body{font:16px system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#172033}main{border:1px solid #ddd;border-radius:12px;padding:1.2rem}input,button{font:inherit;padding:.7rem;width:100%;box-sizing:border-box;margin:.4rem 0}button{background:#173c78;color:#fff;border:0;border-radius:8px}small{color:#555}.notice{color:#a33}</style></head><body><main><h1>Connect Android Bridge</h1><p>Allow your private ai-player plugin to send authorized commands to your paired phone.</p><p>Enter the private relay owner PIN you configured in the hosting dashboard. This does not ask for your Google password.</p>${safeNotice}<form method="post" action="/oauth/authorize"><input type="hidden" name="request_id" value="${escapeHtml(requestId)}"><label for="pin">Relay owner PIN</label><input id="pin" name="owner_pin" type="password" minlength="16" required autocomplete="current-password"><button type="submit">Authorize this connection</button></form><small>Only authorize a connection you initiated. Keep the PIN private.</small></main></body></html>`;
+}
+async function readBodyText(req) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > MAX_BODY) throw Object.assign(new Error("body_too_large"), { status: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function readForm(req) {
+  const text = await readBodyText(req);
+  return new URLSearchParams(text);
+}
+function tooManyOAuthAttempts(ip) {
+  const current = now();
+  let record = oauthAttemptLimits.get(ip);
+  if (!record || record.resetAt <= current) {
+    record = { count: 0, resetAt: current + 10 * 60_000 };
+    oauthAttemptLimits.set(ip, record);
+  }
+  record.count++;
+  return record.count > 12;
+}
+function issueMcpTokens(clientId, resource = OAUTH_RESOURCE) {
+  const issuedAt = Math.floor(now() / 1000);
+  const accessClaims = {
+    iss: PUBLIC_ORIGIN, aud: resource, sub: "bridge-owner", scope: OAUTH_SCOPE,
+    kind: "access", iat: issuedAt, exp: issuedAt + 15 * 60, jti: randomUUID()
+  };
+  const refreshClaims = {
+    iss: PUBLIC_ORIGIN, aud: resource, sub: "bridge-owner", scope: OAUTH_SCOPE,
+    kind: "refresh", client_id: clientId, iat: issuedAt, exp: issuedAt + 30 * 24 * 60 * 60, jti: randomUUID()
+  };
+  return {
+    access_token: signOAuthPayload(accessClaims, "oauth-access"),
+    token_type: "Bearer",
+    expires_in: 900,
+    refresh_token: signOAuthPayload(refreshClaims, "oauth-refresh"),
+    refresh_token_expires_in: 30 * 24 * 60 * 60,
+    scope: OAUTH_SCOPE
+  };
 }
 async function readJson(req) {
   const chunks = [];
@@ -194,12 +314,12 @@ function createMcpServer() {
 
 function mcpHandler(req, res) {
   if (!relayConfigured()) {
-    json(res, 503, { status: "CONFIGURATION_REQUIRED", reason: "Set MCP_API_KEY and DEVICE_SIGNING_SECRET in the hosting dashboard." });
+    json(res, 503, { status: "CONFIGURATION_REQUIRED", reason: "Set OWNER_PIN and DEVICE_SIGNING_SECRET in the hosting dashboard." });
     return;
   }
-  if (!mcpAuthorized(req)) {
+  if (!validMcpRequest(req)) {
     res.writeHead(401, {
-      "WWW-Authenticate": 'Bearer realm="ai-player-relay"',
+      "WWW-Authenticate": 'Bearer resource_metadata="' + PUBLIC_ORIGIN + '/.well-known/oauth-protected-resource", scope="' + OAUTH_SCOPE + '"',
       "Cache-Control": "no-store"
     }).end("Unauthorized");
     return;
@@ -225,11 +345,160 @@ function mcpHandler(req, res) {
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://" + (req.headers.host || "localhost"));
 
+  if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
+    return json(res, 200, {
+      resource: OAUTH_RESOURCE,
+      authorization_servers: [PUBLIC_ORIGIN],
+      scopes_supported: [OAUTH_SCOPE],
+      resource_documentation: PUBLIC_ORIGIN + "/"
+    });
+  }
+  if (req.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
+    return json(res, 200, {
+      issuer: PUBLIC_ORIGIN,
+      authorization_endpoint: PUBLIC_ORIGIN + "/oauth/authorize",
+      token_endpoint: PUBLIC_ORIGIN + "/oauth/token",
+      registration_endpoint: PUBLIC_ORIGIN + "/oauth/register",
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      token_endpoint_auth_methods_supported: ["none"],
+      code_challenge_methods_supported: ["S256"],
+      scopes_supported: [OAUTH_SCOPE]
+    });
+  }
+  if (req.method === "POST" && url.pathname === "/oauth/register") {
+    if (!relayConfigured()) return json(res, 503, { error: "server_error", error_description: "Relay owner PIN and device signing secret must be configured." });
+    try {
+      const body = await readJson(req);
+      const redirectUris = [...new Set(Array.isArray(body.redirect_uris) ? body.redirect_uris : [])];
+      if (redirectUris.length < 1 || redirectUris.length > 10 || !redirectUris.every(isAllowedRedirectUri)) {
+        return json(res, 400, { error: "invalid_redirect_uri", error_description: "Only approved HTTPS ChatGPT callback URLs are accepted." });
+      }
+      const clientName = typeof body.client_name === "string" ? body.client_name.slice(0, 120) : "ChatGPT";
+      const clientId = signOAuthPayload({
+        client_name: clientName,
+        redirect_uris: redirectUris,
+        token_endpoint_auth_method: "none",
+        created_at: now()
+      }, "oauth-client");
+      return json(res, 201, {
+        client_id: clientId,
+        client_name: clientName,
+        redirect_uris: redirectUris,
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"]
+      });
+    } catch (error) {
+      return json(res, error.status || 400, { error: "invalid_client_metadata", error_description: error.message || "Invalid client registration." });
+    }
+  }
+  if (req.method === "GET" && url.pathname === "/oauth/authorize") {
+    if (!relayConfigured()) return html(res, 503, "<!doctype html><meta charset='utf-8'><title>Setup required</title><h1>Relay setup required</h1><p>The owner must configure OWNER_PIN and DEVICE_SIGNING_SECRET in the hosting dashboard before connecting ChatGPT.</p>");
+    purgeExpired();
+    const params = url.searchParams;
+    const clientId = params.get("client_id") || "";
+    const redirectUri = params.get("redirect_uri") || "";
+    const client = validOAuthClient(clientId);
+    const state = params.get("state") || "";
+    const challenge = params.get("code_challenge") || "";
+    const resource = params.get("resource") || OAUTH_RESOURCE;
+    const scope = (params.get("scope") || OAUTH_SCOPE).split(" ").filter(Boolean);
+    if (params.get("response_type") !== "code" || !client || !client.redirect_uris.includes(redirectUri)
+        || !isAllowedRedirectUri(redirectUri) || !state || state.length > 1024
+        || !/^[A-Za-z0-9_-]{43,128}$/.test(challenge)
+        || params.get("code_challenge_method") !== "S256"
+        || resource !== OAUTH_RESOURCE || !scope.includes(OAUTH_SCOPE)) {
+      return html(res, 400, "<!doctype html><meta charset='utf-8'><title>Invalid request</title><h1>Authorization request rejected</h1><p>The OAuth client, redirect URI, resource, state, scope, or PKCE challenge was invalid.</p>");
+    }
+    const requestId = randomUUID() + randomUUID().replace(/-/g, "");
+    oauthAuthorizeRequests.set(requestId, {
+      clientId, redirectUri, state, challenge, resource,
+      scope: OAUTH_SCOPE, expiresAt: now() + 5 * 60_000, attempts: 0
+    });
+    return html(res, 200, authorizePage(requestId));
+  }
+  if (req.method === "POST" && url.pathname === "/oauth/authorize") {
+    if (!relayConfigured()) return html(res, 503, "<!doctype html><meta charset='utf-8'><title>Setup required</title><h1>Relay setup required</h1>");
+    const ip = req.socket.remoteAddress || "unknown";
+    if (tooManyOAuthAttempts(ip)) return html(res, 429, "<!doctype html><meta charset='utf-8'><title>Too many attempts</title><h1>Too many attempts</h1><p>Wait ten minutes, then try again.</p>");
+    try {
+      const form = await readForm(req);
+      const requestId = form.get("request_id") || "";
+      const suppliedPin = form.get("owner_pin") || "";
+      const item = oauthAuthorizeRequests.get(requestId);
+      if (!item || item.expiresAt <= now()) {
+        oauthAuthorizeRequests.delete(requestId);
+        return html(res, 400, "<!doctype html><meta charset='utf-8'><title>Request expired</title><h1>Authorization request expired</h1><p>Return to ChatGPT and try connecting again.</p>");
+      }
+      item.attempts++;
+      if (!safeEqualText(suppliedPin, OWNER_PIN)) {
+        if (item.attempts >= 5) oauthAuthorizeRequests.delete(requestId);
+        return html(res, 401, authorizePage(requestId, item.attempts >= 5
+          ? "Too many incorrect attempts. Restart the connection from ChatGPT."
+          : "PIN did not match. Try again."));
+      }
+      oauthAuthorizeRequests.delete(requestId);
+      const code = randomUUID() + "." + randomUUID().replace(/-/g, "");
+      oauthCodes.set(code, { ...item, expiresAt: now() + 5 * 60_000, used: false });
+      const redirect = new URL(item.redirectUri);
+      redirect.searchParams.set("code", code);
+      redirect.searchParams.set("state", item.state);
+      res.writeHead(302, {
+        "Location": redirect.toString(),
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer"
+      }).end();
+      return;
+    } catch (error) {
+      return html(res, error.status || 400, "<!doctype html><meta charset='utf-8'><title>Authorization failed</title><h1>Authorization failed</h1><p>Return to ChatGPT and retry.</p>");
+    }
+  }
+  if (req.method === "POST" && url.pathname === "/oauth/token") {
+    if (!relayConfigured()) return json(res, 503, { error: "server_error", error_description: "Relay is not configured." });
+    try {
+      const form = await readForm(req);
+      const grantType = form.get("grant_type") || "";
+      const clientId = form.get("client_id") || "";
+      const client = validOAuthClient(clientId);
+      if (!client) return json(res, 401, { error: "invalid_client" });
+
+      if (grantType === "authorization_code") {
+        const code = form.get("code") || "";
+        const item = oauthCodes.get(code);
+        oauthCodes.delete(code);
+        if (!item || item.used || item.expiresAt <= now() || item.clientId !== clientId
+            || form.get("redirect_uri") !== item.redirectUri
+            || !client.redirect_uris.includes(item.redirectUri)) {
+          return json(res, 400, { error: "invalid_grant", error_description: "Authorization code expired, reused, or mismatched." });
+        }
+        const verifier = form.get("code_verifier") || "";
+        if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) return json(res, 400, { error: "invalid_grant" });
+        const calculated = createHash("sha256").update(verifier).digest("base64url");
+        if (!safeEqualText(calculated, item.challenge)) return json(res, 400, { error: "invalid_grant", error_description: "PKCE validation failed." });
+        if (form.get("resource") && form.get("resource") !== item.resource) return json(res, 400, { error: "invalid_target" });
+        return json(res, 200, issueMcpTokens(clientId, item.resource));
+      }
+
+      if (grantType === "refresh_token") {
+        const refresh = verifyRefreshToken(form.get("refresh_token") || "");
+        if (!refresh || refresh.client_id !== clientId || form.get("resource") && form.get("resource") !== refresh.aud) {
+          return json(res, 400, { error: "invalid_grant", error_description: "Refresh token expired or mismatched." });
+        }
+        return json(res, 200, issueMcpTokens(clientId, refresh.aud));
+      }
+
+      return json(res, 400, { error: "unsupported_grant_type" });
+    } catch (error) {
+      return json(res, error.status || 400, { error: "invalid_request", error_description: error.message || "Invalid OAuth token request." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/") {
-    return json(res, 200, { service: "ai-player-android-relay", status: relayConfigured() ? "ready" : "configuration_required", configured: relayConfigured(), mcp: "/mcp", note: "Relay health only; no phone connection is implied." });
+    return json(res, 200, { service: "ai-player-android-relay", status: relayConfigured() ? "ready" : "configuration_required", configured: relayConfigured(), mcp: "/mcp", auth: "OAuth 2.1 + PKCE", note: "Relay health only; no phone connection is implied." });
   }
   if (req.method === "GET" && url.pathname === "/health") {
-    return json(res, 200, { status: relayConfigured() ? "ok" : "configuration_required", version: "1.0.0", configured: relayConfigured() });
+    return json(res, 200, { status: relayConfigured() ? "ok" : "configuration_required", version: "1.1.0", configured: relayConfigured(), auth: "OAuth 2.1 + PKCE" });
   }
   if (url.pathname === "/mcp" && ["POST", "GET", "DELETE"].includes(req.method || "")) {
     if (req.method !== "POST") {
@@ -240,7 +509,7 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/device/pair") {
-    if (!relayConfigured()) return json(res, 503, { status: "CONFIGURATION_REQUIRED", reason: "Relay secrets are not configured by the owner." });
+    if (!relayConfigured()) return json(res, 503, { status: "CONFIGURATION_REQUIRED", reason: "OWNER_PIN and DEVICE_SIGNING_SECRET are not configured by the owner." });
     const ip = req.socket.remoteAddress || "unknown";
     const attempt = pairAttempts.get(ip) || { count: 0, resetAt: now() + 60_000 };
     if (attempt.resetAt <= now()) { attempt.count = 0; attempt.resetAt = now() + 60_000; }
@@ -328,7 +597,7 @@ const httpServer = createServer(async (req, res) => {
 });
 
 if (!relayConfigured()) {
-  console.warn("Relay starts in locked configuration mode; configure secrets in the hosting dashboard before pairing or MCP use.");
+  console.warn("Relay starts in locked configuration mode; configure OWNER_PIN and DEVICE_SIGNING_SECRET in the hosting dashboard before pairing or MCP use.");
 }
 
 httpServer.listen(PORT, "0.0.0.0", () => {
