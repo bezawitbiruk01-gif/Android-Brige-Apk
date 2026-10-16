@@ -37,6 +37,9 @@ jobs:
       - name: Syntax check relay
         run: node --check relay/server.js
 
+      - name: Relay OAuth and device smoke test
+        run: node relay/smoke-test.js
+
       - name: Android lint and build debug APK
         run: gradle --no-daemon :app:lintDebug :app:assembleDebug
 
