@@ -9,7 +9,7 @@ android {
     defaultConfig {
         applicationId 'com.biruk.androidbridge'
         minSdk 29
-        targetSdk 29
+        targetSdk 33
         versionCode 3
         versionName '1.2.0'
     }
