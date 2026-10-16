@@ -26,8 +26,8 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Android lint and build debug APK
+        run: gradle --no-daemon :app:lintDebug :app:assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
