@@ -78,14 +78,14 @@ function validOAuthClient(clientId) {
 function verifyAccessToken(token) {
   const claims = verifyOAuthPayload(token, "oauth-access");
   if (!claims || claims.kind !== "access" || claims.iss !== PUBLIC_ORIGIN
-      || claims.aud !== OAUTH_RESOURCE || !Number.isFinite(claims.exp) || claims.exp <= now()
+      || claims.aud !== OAUTH_RESOURCE || !Number.isFinite(claims.exp) || claims.exp <= Math.floor(now() / 1000)
       || typeof claims.scope !== "string" || !claims.scope.split(" ").includes(OAUTH_SCOPE)) return null;
   return claims;
 }
 function verifyRefreshToken(token) {
   const claims = verifyOAuthPayload(token, "oauth-refresh");
   if (!claims || claims.kind !== "refresh" || claims.iss !== PUBLIC_ORIGIN
-      || claims.aud !== OAUTH_RESOURCE || !Number.isFinite(claims.exp) || claims.exp <= now()
+      || claims.aud !== OAUTH_RESOURCE || !Number.isFinite(claims.exp) || claims.exp <= Math.floor(now() / 1000)
       || typeof claims.client_id !== "string") return null;
   return claims;
 }
