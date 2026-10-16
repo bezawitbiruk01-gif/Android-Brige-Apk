@@ -8,6 +8,7 @@
         android:allowBackup="false"
         android:label="Android Bridge"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
         android:theme="@style/AppTheme">
         <activity
             android:name=".MainActivity"
@@ -17,6 +18,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".BridgeRelayService"
+            android:exported="false" />
 
         <service
             android:name=".BridgeAccessibilityService"
