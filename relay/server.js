@@ -40,8 +40,11 @@ function bearer(req) {
   const header = req.headers.authorization || "";
   return header.startsWith("Bearer ") ? header.slice(7) : "";
 }
+function relayConfigured() {
+  return MCP_API_KEY.length >= 32 && DEVICE_SIGNING_SECRET.length >= 32;
+}
 function mcpAuthorized(req) {
-  return MCP_API_KEY.length >= 32 && safeEqualText(bearer(req), MCP_API_KEY);
+  return relayConfigured() && safeEqualText(bearer(req), MCP_API_KEY);
 }
 async function readJson(req) {
   const chunks = [];
@@ -190,6 +193,10 @@ function createMcpServer() {
 }
 
 function mcpHandler(req, res) {
+  if (!relayConfigured()) {
+    json(res, 503, { status: "CONFIGURATION_REQUIRED", reason: "Set MCP_API_KEY and DEVICE_SIGNING_SECRET in the hosting dashboard." });
+    return;
+  }
   if (!mcpAuthorized(req)) {
     res.writeHead(401, {
       "WWW-Authenticate": 'Bearer realm="ai-player-relay"',
@@ -219,10 +226,10 @@ const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://" + (req.headers.host || "localhost"));
 
   if (req.method === "GET" && url.pathname === "/") {
-    return json(res, 200, { service: "ai-player-android-relay", status: "ready", mcp: "/mcp", note: "Relay health only; no phone connection is implied." });
+    return json(res, 200, { service: "ai-player-android-relay", status: relayConfigured() ? "ready" : "configuration_required", configured: relayConfigured(), mcp: "/mcp", note: "Relay health only; no phone connection is implied." });
   }
   if (req.method === "GET" && url.pathname === "/health") {
-    return json(res, 200, { status: "ok", version: "1.0.0" });
+    return json(res, 200, { status: relayConfigured() ? "ok" : "configuration_required", version: "1.0.0", configured: relayConfigured() });
   }
   if (url.pathname === "/mcp" && ["POST", "GET", "DELETE"].includes(req.method || "")) {
     if (req.method !== "POST") {
@@ -233,6 +240,7 @@ const httpServer = createServer(async (req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/device/pair") {
+    if (!relayConfigured()) return json(res, 503, { status: "CONFIGURATION_REQUIRED", reason: "Relay secrets are not configured by the owner." });
     const ip = req.socket.remoteAddress || "unknown";
     const attempt = pairAttempts.get(ip) || { count: 0, resetAt: now() + 60_000 };
     if (attempt.resetAt <= now()) { attempt.count = 0; attempt.resetAt = now() + 60_000; }
@@ -319,9 +327,8 @@ const httpServer = createServer(async (req, res) => {
   json(res, 404, { error: "not_found" });
 });
 
-if (MCP_API_KEY.length < 32 || DEVICE_SIGNING_SECRET.length < 32) {
-  console.error("MCP_API_KEY and DEVICE_SIGNING_SECRET must each be at least 32 characters.");
-  process.exit(1);
+if (!relayConfigured()) {
+  console.warn("Relay starts in locked configuration mode; configure secrets in the hosting dashboard before pairing or MCP use.");
 }
 
 httpServer.listen(PORT, "0.0.0.0", () => {
