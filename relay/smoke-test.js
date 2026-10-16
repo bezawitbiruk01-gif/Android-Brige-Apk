@@ -37,7 +37,8 @@ async function postForm(path, values) {
   return await fetch(origin + path, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(values)
+    body: new URLSearchParams(values),
+    redirect: "manual"
   });
 }
 async function mcp(token, request) {
