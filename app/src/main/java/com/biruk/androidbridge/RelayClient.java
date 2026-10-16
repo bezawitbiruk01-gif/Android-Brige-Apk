@@ -95,7 +95,21 @@ public final class RelayClient {
 
             while (!stopRequested && !Thread.currentThread().isInterrupted()) {
                 try {
-                    JSONObject response = requestJson(baseUrl + "/device/next?wait=20", "GET", null, deviceToken, 28000);
+                    JSONObject response;
+                    try {
+                        response = requestJson(baseUrl + "/device/next?wait=20", "GET", null, deviceToken, 28000);
+                    } catch (RelayHttpException e) {
+                        if (e.statusCode == 401) {
+                            // Device tokens expire after 30 days or become invalid if the signing secret changes.
+                            prefs.edit().remove(KEY_DEVICE_TOKEN).remove(KEY_PAIR_CODE)
+                                    .putBoolean(MainActivity.KEY_BRIDGE_ENABLED, false).apply();
+                            MainActivity.enabled = false;
+                            setStatus(context, "Relay rejected or expired this phone token. Create a new pairing code in ai-player, enter it in the app, then turn Bridge ON again.");
+                            stopServiceOnExit = true;
+                            break;
+                        }
+                        throw e;
+                    }
                     String status = response.optString("status");
                     if ("COMMAND".equals(status)) {
                         JSONObject command = response.optJSONObject("command");
@@ -188,10 +202,22 @@ public final class RelayClient {
             JSONObject response;
             try { response = new JSONObject(responseText); }
             catch (Exception e) { throw new Exception("HTTP " + code + " response was not JSON"); }
-            if (code >= 400) throw new Exception("HTTP " + code + ": " + response.optString("reason", "request_failed"));
+            if (code >= 400) {
+                throw new RelayHttpException(code,
+                        "HTTP " + code + ": " + response.optString("reason", response.optString("status", "request_failed")));
+            }
             return response;
         } finally {
             if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static final class RelayHttpException extends Exception {
+        final int statusCode;
+
+        RelayHttpException(int statusCode, String message) {
+            super(message);
+            this.statusCode = statusCode;
         }
     }
 

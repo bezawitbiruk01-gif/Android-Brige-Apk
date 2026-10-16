@@ -264,13 +264,13 @@ public final class BridgeServer {
                     }
                     Boolean clicked = callOnMain(() -> BridgeAccessibilityService.clickText(text));
                     response = new JSONObject();
-                    put(response, "status", Boolean.TRUE.equals(clicked) ? "SUCCEEDED" : "FAILED");
+                    put(response, "status", Boolean.TRUE.equals(clicked) ? "ACCEPTED" : "FAILED");
                     put(response, "clicked", Boolean.TRUE.equals(clicked));
-                    put(response, "verified", Boolean.TRUE.equals(clicked));
-                    if (!Boolean.TRUE.equals(clicked)) {
-                        put(response, "reason", "gemini_chrome_required_or_text_not_clickable");
-                        httpCode = 409;
-                    }
+                    put(response, "verified", false);
+                    put(response, "reason", Boolean.TRUE.equals(clicked)
+                            ? "Android accepted the click request; read the screen to verify its effect."
+                            : "gemini_chrome_required_or_text_not_clickable");
+                    if (!Boolean.TRUE.equals(clicked)) httpCode = 409;
                     break;
                 }
                 case "/type": {
@@ -282,13 +282,13 @@ public final class BridgeServer {
                     }
                     Boolean typed = callOnMain(() -> BridgeAccessibilityService.typeText(value));
                     response = new JSONObject();
-                    put(response, "status", Boolean.TRUE.equals(typed) ? "SUCCEEDED" : "FAILED");
+                    put(response, "status", Boolean.TRUE.equals(typed) ? "ACCEPTED" : "FAILED");
                     put(response, "typed", Boolean.TRUE.equals(typed));
-                    put(response, "verified", Boolean.TRUE.equals(typed));
-                    if (!Boolean.TRUE.equals(typed)) {
-                        put(response, "reason", "gemini_chrome_required_and_editable_field_must_be_focused");
-                        httpCode = 409;
-                    }
+                    put(response, "verified", false);
+                    put(response, "reason", Boolean.TRUE.equals(typed)
+                            ? "Android accepted the text-entry request; the text was not sent. Read the screen to verify."
+                            : "gemini_chrome_required_and_editable_field_must_be_focused");
+                    if (!Boolean.TRUE.equals(typed)) httpCode = 409;
                     break;
                 }
                 default:

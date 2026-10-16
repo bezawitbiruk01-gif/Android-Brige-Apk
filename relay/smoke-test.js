@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 
 const port = 18000 + (process.pid % 20000);
 const origin = `http://127.0.0.1:${port}`;
@@ -128,6 +128,18 @@ try {
   const tokens = await tokenResponse.json();
   assert.ok(tokens.access_token);
   assert.ok(tokens.refresh_token);
+
+  const expiredDevicePayload = Buffer.from(JSON.stringify({
+    sub: "expired-device",
+    exp: Date.now() - 1000
+  })).toString("base64url");
+  const expiredDeviceSignature = createHmac("sha256", deviceSecret)
+    .update(expiredDevicePayload).digest("base64url");
+  const expiredDeviceToken = expiredDevicePayload + "." + expiredDeviceSignature;
+  const expiredDeviceResponse = await fetch(origin + "/device/next?wait=1", {
+    headers: { authorization: "Bearer " + expiredDeviceToken }
+  });
+  assert.equal(expiredDeviceResponse.status, 401, "expired device tokens must be rejected");
 
   const unauthenticated = await fetch(origin + "/mcp", {
     method: "POST",

@@ -14,6 +14,10 @@ const MAX_BODY = 24 * 1024;
 const DEVICE_ONLINE_MS = 75_000;
 const PAIR_CODE_TTL_MS = 5 * 60_000;
 const COMMAND_TIMEOUT_MS = 28_000;
+const MAX_PENDING_AUTH_REQUESTS = 1000;
+const MAX_AUTH_CODES = 1000;
+const MAX_PAIR_CODES = 500;
+const MAX_QUEUED_COMMANDS_PER_DEVICE = 20;
 
 const pairCodes = new Map();
 const devices = new Map();
@@ -213,9 +217,15 @@ function purgeExpired() {
     if (current - device.lastSeen > 24 * 60 * 60_000 && device.queue.length === 0 && !device.waiter) devices.delete(id);
   }
   for (const [ip, item] of pairAttempts) if (item.resetAt <= current) pairAttempts.delete(ip);
+  for (const [id, item] of oauthAuthorizeRequests) if (item.expiresAt <= current) oauthAuthorizeRequests.delete(id);
+  for (const [code, item] of oauthCodes) if (item.expiresAt <= current) oauthCodes.delete(code);
+  for (const [ip, item] of oauthAttemptLimits) if (item.resetAt <= current) oauthAttemptLimits.delete(ip);
 }
 function issuePairCode() {
   purgeExpired();
+  if (pairCodes.size >= MAX_PAIR_CODES) {
+    throw new Error("Too many active pairing codes. Wait for existing codes to expire.");
+  }
   let code;
   do { code = String(randomInt(100000, 1_000_000)); } while (pairCodes.has(code));
   pairCodes.set(code, { expiresAt: now() + PAIR_CODE_TTL_MS });
@@ -233,10 +243,15 @@ function currentDevice() {
   return online[0] || null;
 }
 function enqueue(device, command) {
+  if (!device.waiter && device.queue.length >= MAX_QUEUED_COMMANDS_PER_DEVICE) {
+    return Promise.resolve({ status: "FAILED", verified: false, reason: "device_command_queue_full" });
+  }
   return new Promise((resolve) => {
-    const item = { ...command, deviceId: device.id, resolve, timer: null };
+    const item = { ...command, deviceId: device.id, resolve, timer: null, delivered: false };
     item.timer = setTimeout(() => {
       pending.delete(item.id);
+      const queuedIndex = device.queue.findIndex(queued => queued.id === item.id);
+      if (queuedIndex !== -1) device.queue.splice(queuedIndex, 1);
       resolve({ status: "FAILED", verified: false, reason: "device_response_timeout", commandId: item.id });
     }, COMMAND_TIMEOUT_MS);
     pending.set(item.id, item);
@@ -245,6 +260,7 @@ function enqueue(device, command) {
       device.waiter = null;
       clearTimeout(waiter.timer);
       device.lastSeen = now();
+      item.delivered = true;
       waiter.resolve(item);
     } else {
       device.queue.push(item);
@@ -344,6 +360,7 @@ function mcpHandler(req, res) {
 
 const httpServer = createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://" + (req.headers.host || "localhost"));
+  purgeExpired();
 
   if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
     return json(res, 200, {
@@ -411,6 +428,9 @@ const httpServer = createServer(async (req, res) => {
         || resource !== OAUTH_RESOURCE || !scope.includes(OAUTH_SCOPE)) {
       return html(res, 400, "<!doctype html><meta charset='utf-8'><title>Invalid request</title><h1>Authorization request rejected</h1><p>The OAuth client, redirect URI, resource, state, scope, or PKCE challenge was invalid.</p>");
     }
+    if (oauthAuthorizeRequests.size >= MAX_PENDING_AUTH_REQUESTS) {
+      return html(res, 503, "<!doctype html><meta charset='utf-8'><title>Busy</title><h1>Too many pending authorization requests</h1><p>Wait briefly and retry.</p>");
+    }
     const requestId = randomUUID() + randomUUID().replace(/-/g, "");
     oauthAuthorizeRequests.set(requestId, {
       clientId, redirectUri, state, challenge, resource,
@@ -439,6 +459,9 @@ const httpServer = createServer(async (req, res) => {
           : "PIN did not match. Try again."));
       }
       oauthAuthorizeRequests.delete(requestId);
+      if (oauthCodes.size >= MAX_AUTH_CODES) {
+        return html(res, 503, "<!doctype html><meta charset='utf-8'><title>Busy</title><h1>Too many pending authorization codes</h1><p>Wait briefly and retry.</p>");
+      }
       const code = randomUUID() + "." + randomUUID().replace(/-/g, "");
       oauthCodes.set(code, { ...item, expiresAt: now() + 5 * 60_000, used: false });
       const redirect = new URL(item.redirectUri);
@@ -541,9 +564,11 @@ const httpServer = createServer(async (req, res) => {
     if (!device) return json(res, 401, { status: "BLOCKED", reason: "invalid_device_token" });
     if (device.queue.length) {
       const command = device.queue.shift();
+      command.delivered = true;
       return json(res, 200, { status: "COMMAND", command: { id: command.id, action: command.action, payload: command.payload } });
     }
-    const wait = Math.min(Math.max(Number(url.searchParams.get("wait") || 20), 1), 25);
+    const requestedWait = Number(url.searchParams.get("wait") || 20);
+    const wait = Number.isFinite(requestedWait) ? Math.min(Math.max(requestedWait, 1), 25) : 20;
     const result = await new Promise((resolve) => {
       const existing = device.waiter;
       if (existing) {
@@ -599,6 +624,10 @@ const httpServer = createServer(async (req, res) => {
 if (!relayConfigured()) {
   console.warn("Relay starts in locked configuration mode; configure OWNER_PIN and DEVICE_SIGNING_SECRET in the hosting dashboard before pairing or MCP use.");
 }
+
+httpServer.headersTimeout = 15_000;
+httpServer.requestTimeout = 30_000;
+httpServer.keepAliveTimeout = 5_000;
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log("AI Player Relay listening on port " + PORT);

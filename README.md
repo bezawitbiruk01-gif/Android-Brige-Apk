@@ -37,9 +37,9 @@ Render supplies `PORT`. Optional `PUBLIC_ORIGIN` defaults to `https://biruk-ai-p
 
 ## Security and limitations
 - ChatGPT relay authentication uses OAuth 2.1 authorization-code with PKCE; all relay commands require a valid signed access token.
-- Phone pairing uses a short-lived one-time code; device tokens are signed and expire after 30 days.
-- The relay uses in-memory queues and authorization codes. Service restarts may interrupt commands or require pairing again.
-- The visible word “Gemini” is only a UI heuristic, not cryptographic proof of website origin.
+- Phone pairing uses a short-lived one-time code; device tokens are signed and expire after 30 days. When a token is rejected or expires, the app stops the bridge and asks for a fresh pairing code instead of retrying forever.
+- The relay uses in-memory queues and authorization codes. Expired OAuth requests are cleaned up, queues are bounded, and commands that time out while still queued are removed; service restarts may still interrupt commands or require pairing again.
+- Click and type results are reported as accepted actions, not verified outcomes; call `read_gemini_screen` afterward to check the visible result. The visible word “Gemini” is only a UI heuristic, not cryptographic proof of website origin.
 - Launching Chrome from a background service may be restricted by Android. The phone may require the user to bring the app or Chrome to the foreground.
 - This is an early prototype, not an independently security-audited product. Do not send passwords, cookies, recovery codes, or Google login tokens through it. It must not bypass login, CAPTCHA, rate limits, app rules, or anti-cheat protections.
 - End-to-end operation still requires configuration in Render, the plugin's OAuth connection, pairing, installation of the latest APK, and real-device testing.

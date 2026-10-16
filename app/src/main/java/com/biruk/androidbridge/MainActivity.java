@@ -197,10 +197,16 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "The pairing code must be exactly 6 digits.", Toast.LENGTH_LONG).show();
             return false;
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String oldUrl = prefs.getString(KEY_RELAY_URL, DEFAULT_RELAY_URL);
+        android.content.SharedPreferences.Editor editor = prefs.edit()
                 .putString(KEY_RELAY_URL, url)
-                .putString(KEY_PAIR_CODE, code)
-                .apply();
+                .putString(KEY_PAIR_CODE, code);
+        if (!url.replaceAll("/+$", "").equals(oldUrl.replaceAll("/+$", ""))) {
+            // A device token belongs to the old relay; never send it to a different host.
+            editor.remove(KEY_RELAY_TOKEN).remove("relay_device_id");
+        }
+        editor.apply();
         return true;
     }
 
@@ -322,18 +328,24 @@ public class MainActivity extends Activity {
                     String wanted = payload.optString("text", "");
                     boolean clicked = BridgeAccessibilityService.clickText(wanted);
                     JSONObject response = new JSONObject();
-                    response.put("status", clicked ? "SUCCEEDED" : "FAILED");
-                    response.put("verified", clicked);
-                    if (!clicked) response.put("reason", "gemini_chrome_not_detected_or_text_not_clickable");
+                    response.put("status", clicked ? "ACCEPTED" : "FAILED");
+                    response.put("verified", false);
+                    response.put("action", action);
+                    response.put("reason", clicked
+                            ? "Android accepted the click request; call read_gemini_screen to verify the resulting screen."
+                            : "gemini_chrome_not_detected_or_text_not_clickable");
                     return response;
                 }
                 case "TYPE_GEMINI_TEXT": {
                     String text = payload.optString("text", "");
                     boolean typed = BridgeAccessibilityService.typeText(text);
                     JSONObject response = new JSONObject();
-                    response.put("status", typed ? "SUCCEEDED" : "FAILED");
-                    response.put("verified", typed);
-                    if (!typed) response.put("reason", "gemini_chrome_not_detected_or_no_focused_editable_field");
+                    response.put("status", typed ? "ACCEPTED" : "FAILED");
+                    response.put("verified", false);
+                    response.put("action", action);
+                    response.put("reason", typed
+                            ? "Android accepted the text-entry request; the prompt was not sent. Call read_gemini_screen to verify the visible field."
+                            : "gemini_chrome_not_detected_or_no_focused_editable_field");
                     return response;
                 }
                 case "EMERGENCY_STOP": {
