@@ -43,6 +43,7 @@ public class MainActivity extends Activity {
     static final String KEY_RELAY_STATUS = "relay_status";
     static final String KEY_BRIDGE_ENABLED = "bridge_enabled";
     static final String GEMINI_URL = "https://gemini.google.com/";
+    static final String DEFAULT_RELAY_URL = "https://biruk-ai-player-relay.onrender.com";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -79,7 +80,7 @@ public class MainActivity extends Activity {
                 | android.text.InputType.TYPE_TEXT_VARIATION_URI);
         relayUrlInput.setHint("https://your-relay.onrender.com");
         relayUrlInput.setText(getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getString(KEY_RELAY_URL, ""));
+                .getString(KEY_RELAY_URL, DEFAULT_RELAY_URL));
         root.addView(relayUrlInput);
 
         TextView pairLabel = new TextView(this);
