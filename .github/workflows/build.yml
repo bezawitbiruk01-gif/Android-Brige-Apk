@@ -26,6 +26,18 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Install Node.js for relay validation
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install relay dependencies
+        run: npm install --ignore-scripts
+
+      - name: Syntax check relay
+        run: node --check relay/server.js
+
       - name: Android lint and build debug APK
         run: gradle --no-daemon :app:lintDebug :app:assembleDebug
 
